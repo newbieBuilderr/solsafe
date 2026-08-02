@@ -165,19 +165,30 @@ if (PAY_TO) {
             payTo: PAY_TO,
             // Longer than the raw endpoint's: this one waits on a model round trip as well as
             // the RPC and pair lookups.
-            maxTimeoutSeconds: 120,
+            maxTimeoutSeconds: 240,
           },
           description: "Agent-written due-diligence brief explaining one Solana token's facts",
+          // Raised from 120s. The window has to cover a cold start on a sleeping free-tier host
+          // (~60s) plus a model round trip (~30s observed). If it expires we have already paid
+          // for the model tokens and cannot settle -- the one failure mode here that costs us
+          // rather than the caller.
         },
       },
       resourceServer,
     ),
   );
   console.log(`[solsafe] paid mode: ${PRICE}/call on ${NETWORK} -> ${PAY_TO}`);
+  // Report the facilitator and the money separately. Conflating them was misleading: CDP also
+  // serves Sepolia, so "CDP" does not imply real funds -- NETWORK decides that.
   console.log(
     USE_CDP
-      ? "[solsafe] facilitator: Coinbase CDP (production, settles real USDC)"
+      ? "[solsafe] facilitator: Coinbase CDP"
       : `[solsafe] facilitator: ${FACILITATOR_URL} (public sandbox, TESTNET ONLY)`,
+  );
+  console.log(
+    IS_MAINNET
+      ? "[solsafe] *** MAINNET -- payments are REAL money ***"
+      : "[solsafe] testnet -- payments are valueless test USDC",
   );
 } else {
   // Deliberately still serves, unpriced, instead of refusing to boot. The whole service must be
@@ -195,6 +206,15 @@ app.get("/safety/:mint", async (req, res) => {
   }
 });
 
+// A caller is never charged for a failed brief. The payment middleware runs this handler first
+// and only settles when it returns under 400; on a throw or any error status it cancels the
+// verified payment instead, so nothing is submitted on chain. Verified empirically against a
+// deliberately broken key: the response was a 401 and the payer's balance did not move.
+//
+// The practical consequence: when the Anthropic credit runs dry, callers get an error and keep
+// their money. Returning an error status here is therefore the correct behaviour, not a
+// fallback -- never swallow a failure and return 200 with a degraded body, because that WOULD
+// charge them for nothing.
 app.get("/brief/:mint", async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY) {
     // Said plainly rather than surfaced as a generic 500: a paying caller must never be billed
