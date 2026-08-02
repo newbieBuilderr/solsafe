@@ -40,6 +40,11 @@ const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilit
 
 const app = express();
 
+// Behind Render's (or any) reverse proxy, so req.protocol reflects the original https rather
+// than the http hop inside the platform's network. Without this the landing page advertises
+// http:// URLs for an https-only service.
+app.set("trust proxy", true);
+
 // --- Free routes ------------------------------------------------------------------------
 // Registered before the payment middleware so they are never gated. A service that charges for
 // its own documentation cannot be discovered by the agents meant to buy from it.
@@ -48,7 +53,11 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, network: NETWORK, mainnet: IS_MAINNET, priced: Boolean(PAY_TO) });
 });
 
-app.get("/", (_req, res) => {
+app.get("/", (req, res) => {
+  // Derived from the request, not from PORT. The old version interpolated the listening port,
+  // which is correct locally and useless in production -- a deployed page told every visitor to
+  // curl localhost:10000. A caller needs the address they actually reached us on.
+  const base = `${req.protocol}://${req.get("host")}`;
   res.type("html").send(`<!doctype html>
 <meta charset="utf-8"><title>solsafe -- Solana token safety, per call</title>
 <style>
@@ -62,9 +71,13 @@ app.get("/", (_req, res) => {
 <h1>solsafe</h1>
 <p class="m">Verifiable Solana token facts, billed per request over x402. No API key. No signup.</p>
 
-<h2>Endpoint</h2>
-<pre>GET /safety/&lt;mint&gt;    ${PRICE} per call</pre>
-<p>Call it without payment and you get <code>402</code> plus instructions. Pay, retry, get JSON.</p>
+<h2>Endpoints</h2>
+<pre>GET /safety/&lt;mint&gt;    ${PRICE} per call
+GET /brief/&lt;mint&gt;     ${BRIEF_PRICE} per call</pre>
+<p>Call either without payment and you get <code>402</code> plus instructions. Pay, retry, get JSON.</p>
+<p><code>/safety</code> returns the raw measurements. <code>/brief</code> returns those same measurements
+plus a written explanation of what they establish, what is unusual about this particular token, and
+what the data does not cover. The brief is generated per call, which is why it costs more.</p>
 
 <h2>What you get</h2>
 <table>
@@ -84,7 +97,11 @@ by a stated rule, so you can re-run any of it against your own RPC and get the s
 Absence of a flag is not a guarantee of safety.</p>
 
 <h2>Try it</h2>
-<pre>curl -s localhost:${PORT}/safety/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263</pre>
+<pre>curl -i ${base}/safety/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263</pre>
+<p class="m">That returns <code>402</code>. The payment instructions are in the
+<code>payment-required</code> response header, base64-encoded JSON — which is why <code>-i</code>
+matters, and why the body is an empty <code>{}</code>. Decode it to see the amount, the asset,
+and the address to pay.</p>
 <p class="m">Network: ${NETWORK}${IS_MAINNET ? " (mainnet -- real USDC)" : " (testnet -- valueless test USDC)"}</p>
 `);
 });
