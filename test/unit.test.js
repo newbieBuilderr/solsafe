@@ -13,8 +13,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { toDecimalString, looksLikeMint, getMintAuthorities } from "../src/solana.js";
-import { rank, isPumpfunOrigin } from "../src/pairs.js";
+import { rank, isPumpfunOrigin, getBestPair } from "../src/pairs.js";
 import { checkMint } from "../src/safety.js";
+
+/** BONK. Used throughout as a syntactically valid mint; most tests stub the network anyway. */
+const MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
 // --- toDecimalString ------------------------------------------------------------------------
 // The bug this guards: supply was computed as Number(raw) / 10 ** decimals, which silently loses
@@ -150,6 +153,96 @@ test("rank tolerates pairs missing quote or liquidity data", () => {
   assert.equal(Number.isFinite(rank({})), true);
 });
 
+// --- getBestPair ----------------------------------------------------------------------------
+// Exercises the selection end to end, not just the rank() helper, because the bug that motivated
+// it lived in which candidates got considered as much as in how they were ordered.
+
+const dexReply = (pairs) => ({ ok: true, status: 200, json: async () => ({ pairs }) });
+
+const solPair = {
+  chainId: "solana",
+  baseToken: { address: MINT, symbol: "TKN", name: "Token" },
+  quoteToken: { symbol: "SOL" },
+  liquidity: { usd: 1_000 },
+  priceUsd: "0.19",
+  dexId: "orca",
+  pairAddress: "pairSOL",
+  pairCreatedAt: 1_672_000_000_000,
+};
+
+const exoticPair = {
+  chainId: "solana",
+  baseToken: { address: MINT, symbol: "TKN", name: "Token" },
+  quoteToken: { symbol: "MET" },
+  liquidity: { usd: 50_000_000 },
+  priceUsd: "943",
+  dexId: "meteora",
+  pairAddress: "pairMET",
+  pairCreatedAt: 1_672_000_000_000,
+};
+
+test("getBestPair picks the SOL-quoted pair over a 50,000x deeper exotic one", async () => {
+  await withStubbedFetch(async () => dexReply([exoticPair, solPair]), async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, true);
+    assert.equal(r.quoteSymbol, "SOL");
+    assert.equal(r.quoteIsSane, true);
+    // The whole point: the $943 price never gets returned.
+    assert.equal(r.priceUsd, 0.19);
+    assert.equal(r.pairsFound, 2);
+  });
+});
+
+test("getBestPair reports quoteIsSane false when only an exotic pair exists", async () => {
+  await withStubbedFetch(async () => dexReply([exoticPair]), async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, true);
+    assert.equal(r.quoteIsSane, false);
+  });
+});
+
+test("getBestPair ignores pairs where the mint is the quote side, not the base", async () => {
+  // DexScreener's price math is base-oriented; reading an inverted pair returns the reciprocal.
+  const inverted = { ...solPair, baseToken: { address: "someOtherMint" }, quoteToken: { symbol: "TKN" } };
+  await withStubbedFetch(async () => dexReply([inverted]), async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, false);
+    assert.match(r.reason, /no Solana pair/);
+  });
+});
+
+test("getBestPair ignores pairs on other chains", async () => {
+  await withStubbedFetch(async () => dexReply([{ ...solPair, chainId: "ethereum" }]), async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, false);
+  });
+});
+
+test("getBestPair carries the HTTP status when DexScreener errors", async () => {
+  await withStubbedFetch(async () => ({ ok: false, status: 503, json: async () => ({}) }), async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, false);
+    assert.match(r.reason, /503/);
+  });
+});
+
+test("getBestPair carries the transport error when DexScreener is unreachable", async () => {
+  await withStubbedFetch(async () => { throw new Error("ENOTFOUND api.dexscreener.com"); }, async () => {
+    const r = await getBestPair(MINT);
+    assert.equal(r.available, false);
+    assert.match(r.reason, /ENOTFOUND/);
+  });
+});
+
+test("getBestPair derives pair age in seconds from a millisecond timestamp", async () => {
+  await withStubbedFetch(async () => dexReply([solPair]), async () => {
+    const r = await getBestPair(MINT);
+    const expected = Math.round(Date.now() / 1000 - 1_672_000_000_000 / 1000);
+    assert.ok(Math.abs(r.pairAgeSeconds - expected) <= 2, "age should be seconds, not milliseconds");
+    assert.ok(r.pairAgeSeconds > 0);
+  });
+});
+
 // --- pump.fun origin ------------------------------------------------------------------------
 
 test("isPumpfunOrigin recognises venue spellings and the surviving address suffix", () => {
@@ -162,8 +255,6 @@ test("isPumpfunOrigin recognises venue spellings and the surviving address suffi
 });
 
 // --- checkMint branches ---------------------------------------------------------------------
-
-const MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
 const workingAuthorities = async () => ({
   exists: true,

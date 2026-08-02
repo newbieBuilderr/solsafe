@@ -1,0 +1,25 @@
+name: test
+
+# Runs on every push and pull request. The suite is offline and dependency-free, so this needs no
+# secrets, no RPC key, and no network -- which is also why it is safe to gate deploys on.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` rather than `npm install`: installs exactly what package-lock.json pins, so a
+      # green run here means the same tree that will be deployed.
+      - run: npm ci
+
+      - run: npm test
