@@ -50,7 +50,16 @@ app.set("trust proxy", true);
 // its own documentation cannot be discovered by the agents meant to buy from it.
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, network: NETWORK, mainnet: IS_MAINNET, priced: Boolean(PAY_TO) });
+  // payTo is published deliberately: it already appears in every 402 challenge, and surfacing it
+  // here lets a caller confirm where their money would go before spending anything. A receiving
+  // address is public by nature -- there is nothing here to protect.
+  res.json({
+    ok: true,
+    network: NETWORK,
+    mainnet: IS_MAINNET,
+    priced: Boolean(PAY_TO),
+    payTo: PAY_TO ?? null,
+  });
 });
 
 app.get("/", (req, res) => {

@@ -117,11 +117,35 @@ const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`HTTP ${res.status} in ${elapsed}s`);
 
 const settlement = res.headers.get("payment-response");
+let settlementTx;
 if (settlement) {
   try {
-    console.log("settlement:", JSON.stringify(decodePaymentResponseHeader(settlement), null, 2));
+    const decoded = decodePaymentResponseHeader(settlement);
+    settlementTx = decoded.transaction;
+    console.log("settlement:", JSON.stringify(decoded, null, 2));
   } catch {
     console.log("settlement header present but could not be decoded");
+  }
+}
+
+// Wait for the settlement transaction, and remember which block it landed in. Waiting alone is
+// not enough: public RPC endpoints load-balance across nodes at different heights, so a read
+// issued right after a confirmed receipt can still be served by a node that hasn't seen the
+// block. Pinning the later balance read to this exact block number removes the race entirely.
+// Without it the script reports "spent 0" on a payment that did go through, which looks like a
+// broken paywall and is the opposite of the truth.
+let settledBlock;
+if (settlementTx) {
+  process.stdout.write("\nwaiting for settlement to confirm ... ");
+  try {
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: settlementTx,
+      timeout: 60_000,
+    });
+    settledBlock = receipt.blockNumber;
+    console.log(`${receipt.status} (block ${receipt.blockNumber})`);
+  } catch {
+    console.log("not confirmed within 60s -- balances below may lag the chain");
   }
 }
 
@@ -148,8 +172,29 @@ const after = await publicClient.readContract({
   ],
   functionName: "balanceOf",
   args: [account.address],
+  // As at the settlement block, not "now" -- see the note above.
+  ...(settledBlock ? { blockNumber: settledBlock } : {}),
 });
 
-console.log(`\nbalance before : ${formatUnits(balance, 6)} test USDC`);
-console.log(`balance after  : ${formatUnits(after, 6)} test USDC`);
-console.log(`spent          : ${formatUnits(balance - after, 6)} test USDC`);
+const sellerAfter = await publicClient.readContract({
+  address: USDC,
+  abi: [
+    {
+      name: "balanceOf",
+      type: "function",
+      stateMutability: "view",
+      inputs: [{ name: "account", type: "address" }],
+      outputs: [{ name: "", type: "uint256" }],
+    },
+  ],
+  functionName: "balanceOf",
+  args: [health.payTo ?? account.address],
+  ...(settledBlock ? { blockNumber: settledBlock } : {}),
+});
+
+console.log(`\nbuyer before : ${formatUnits(balance, 6)} test USDC`);
+console.log(`buyer after  : ${formatUnits(after, 6)} test USDC`);
+console.log(`spent        : ${formatUnits(balance - after, 6)} test USDC`);
+if (health.payTo) {
+  console.log(`seller holds : ${formatUnits(sellerAfter, 6)} test USDC (${health.payTo})`);
+}
