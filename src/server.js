@@ -156,7 +156,10 @@ if (PAY_TO) {
   app.use(
     paymentMiddleware(
       {
-        "GET /safety/*": {
+        // Named parameter rather than a wildcard: the bazaar generates discovery metadata from
+        // the route pattern, and `/safety/*` yields a meaningless "var1" where `:mint` tells a
+        // browsing agent what to put there.
+        "GET /safety/:mint": {
           accepts: {
             scheme: "exact",
             price: PRICE,
@@ -165,8 +168,42 @@ if (PAY_TO) {
             maxTimeoutSeconds: 60,
           },
           description: "Verifiable safety and liquidity facts for one Solana SPL token mint",
+          // Opts this route into the x402 bazaar -- the discovery directory agents query to find
+          // endpoints. Without it the service is reachable only by someone who already has the
+          // URL, which is not a distribution strategy.
+          extensions: {
+            bazaar: {
+              info: {
+                name: "solsafe — Solana token safety facts",
+                description:
+                  "Measured on-chain and market facts for a Solana SPL token: whether the mint "
+                  + "and freeze authorities are still active, how concentrated the largest "
+                  + "holders are, the best-quoted pair's liquidity, price and age, and whether "
+                  + "the mint originated on pump.fun. Facts only -- no score, no signal, no "
+                  + "price prediction. Every field is reproducible against your own RPC.",
+                tags: ["solana", "spl-token", "token-safety", "rug-check", "onchain-data"],
+                input: {
+                  type: "http",
+                  method: "GET",
+                },
+                output: {
+                  type: "object",
+                  properties: {
+                    complete: { type: "boolean", description: "Was every section retrieved" },
+                    authority: { type: "object", description: "Mint/freeze authority state and exact supply" },
+                    holders: { type: "object", description: "Concentration among the largest accounts" },
+                    market: { type: "object", description: "Best-quoted pair: liquidity, price, age" },
+                    origin: { type: "object", description: "Whether the mint originated on pump.fun" },
+                  },
+                },
+              },
+              schema: {
+                mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+              },
+            },
+          },
         },
-        "GET /brief/*": {
+        "GET /brief/:mint": {
           accepts: {
             scheme: "exact",
             price: BRIEF_PRICE,
@@ -177,6 +214,33 @@ if (PAY_TO) {
             maxTimeoutSeconds: 240,
           },
           description: "Agent-written due-diligence brief explaining one Solana token's facts",
+          extensions: {
+            bazaar: {
+              info: {
+                name: "solsafe — written due-diligence brief",
+                description:
+                  "Everything /safety returns, plus a written explanation of what those facts "
+                  + "establish, what is unusual about this particular token, what the data does "
+                  + "not cover, and concrete checks you can run yourself. Generated per call. "
+                  + "Contains no recommendation, rating, or price prediction.",
+                tags: ["solana", "spl-token", "due-diligence", "token-analysis", "llm"],
+                input: {
+                  type: "http",
+                  method: "GET",
+                },
+                output: {
+                  type: "object",
+                  properties: {
+                    brief: { type: "object", description: "Summary, what the facts establish, what is unusual, what is not covered, and checks to run yourself" },
+                    facts: { type: "object", description: "The same measured facts /safety returns, so the prose can be checked against its inputs" },
+                  },
+                },
+              },
+              schema: {
+                mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+              },
+            },
+          },
           // Raised from 120s. The window has to cover a cold start on a sleeping free-tier host
           // (~60s) plus a model round trip (~30s observed). If it expires we have already paid
           // for the model tokens and cannot settle -- the one failure mode here that costs us
