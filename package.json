@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@coinbase/x402": "^2.1.0",
     "@x402/core": "^2.20.0",
     "@x402/evm": "^2.20.0",
     "@x402/express": "^2.20.0",

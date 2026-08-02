@@ -17,6 +17,8 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 
+import { facilitator as cdpFacilitator } from "@coinbase/x402";
+
 import { checkMint } from "./safety.js";
 import { generateBrief } from "./brief.js";
 import { rpcEndpointInUse } from "./solana.js";
@@ -117,8 +119,28 @@ and the address to pay.</p>
 
 // --- Paid route -------------------------------------------------------------------------
 
+// --- Facilitator selection ----------------------------------------------------------------
+// The facilitator verifies signatures and moves the USDC. This is NOT interchangeable across
+// networks: the public sandbox at x402.org/facilitator serves testnets only, and pointing it at
+// Base mainnet silently yields a service that 402s every caller and can never settle. Mainnet
+// needs a production facilitator -- Coinbase's CDP one, which authenticates with an API key
+// pair and is free for the first 1,000 settlements a month.
+const USE_CDP = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
+
+// Refuse to boot rather than accept money we cannot settle. Without this the failure is
+// invisible from the outside: the paywall looks healthy, every caller is told to pay, and not
+// one payment can complete.
+if (IS_MAINNET && !USE_CDP) {
+  console.error("[solsafe] REFUSING TO START: NETWORK is Base mainnet but no CDP credentials are set.");
+  console.error("[solsafe] The public x402.org facilitator is testnet-only and cannot settle mainnet payments.");
+  console.error("[solsafe] Set CDP_API_KEY_ID and CDP_API_KEY_SECRET, or set NETWORK back to eip155:84532.");
+  process.exit(1);
+}
+
 if (PAY_TO) {
-  const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
+  const facilitatorClient = new HTTPFacilitatorClient(
+    USE_CDP ? cdpFacilitator : { url: FACILITATOR_URL },
+  );
   const resourceServer = new x402ResourceServer(facilitatorClient)
     .register(NETWORK, new ExactEvmScheme());
 
@@ -152,6 +174,11 @@ if (PAY_TO) {
     ),
   );
   console.log(`[solsafe] paid mode: ${PRICE}/call on ${NETWORK} -> ${PAY_TO}`);
+  console.log(
+    USE_CDP
+      ? "[solsafe] facilitator: Coinbase CDP (production, settles real USDC)"
+      : `[solsafe] facilitator: ${FACILITATOR_URL} (public sandbox, TESTNET ONLY)`,
+  );
 } else {
   // Deliberately still serves, unpriced, instead of refusing to boot. The whole service must be
   // testable before a receiving address exists -- otherwise the first time the check logic runs
