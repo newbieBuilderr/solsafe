@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+
+# Private working notes -- costs, margins, and where the project actually stands.
+# Useful to you, not to callers, and not something to publish. Stays local.
+START-HERE.md

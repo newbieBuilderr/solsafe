@@ -1,0 +1,21 @@
+{
+  "name": "solsafe",
+  "version": "0.1.0",
+  "description": "Pay-per-call Solana token safety facts, billed over x402",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@x402/core": "^2.20.0",
+    "@x402/evm": "^2.20.0",
+    "@x402/express": "^2.20.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
+}
