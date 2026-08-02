@@ -16,7 +16,23 @@ export function looksLikeMint(address) {
   return typeof address === "string" && BASE58_RE.test(address);
 }
 
-async function rpc(method, params) {
+/**
+ * Whether a failure is worth trying again.
+ *
+ * Deliberately narrow. Retrying a deterministic rejection -- a malformed address, a token with
+ * too many holders to index -- just burns latency the caller is waiting on and ends in the same
+ * answer. Only load-shedding qualifies: `-32603 account index service overloaded, please try
+ * again` was observed in production against BONK, where an immediate retry succeeded, and the
+ * message says as much.
+ */
+function isTransient(message) {
+  return /rate-limited|HTTP 429|HTTP 5\d\d|overloaded|try again|timeout|ETIMEDOUT|ECONNRESET|fetch failed/i
+    .test(message);
+}
+
+const RPC_ATTEMPTS = 3;
+
+async function rpcOnce(method, params) {
   const resp = await fetch(RPC_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -38,6 +54,22 @@ async function rpc(method, params) {
   const body = await resp.json();
   if (body.error) throw new Error(`RPC error ${body.error.code}: ${body.error.message}`);
   return body.result;
+}
+
+async function rpc(method, params) {
+  let lastError;
+  for (let attempt = 1; attempt <= RPC_ATTEMPTS; attempt++) {
+    try {
+      return await rpcOnce(method, params);
+    } catch (e) {
+      lastError = e;
+      if (attempt === RPC_ATTEMPTS || !isTransient(e.message)) throw e;
+      // Short backoff: the caller is blocked on this, and a paid request that takes ten seconds
+      // to answer is its own kind of failure. 200ms then 600ms.
+      await new Promise((r) => setTimeout(r, 200 * 3 ** (attempt - 1)));
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -85,7 +117,7 @@ export async function getMintAuthorities(mint) {
  * double can represent, and quietly rounding one would be indistinguishable from reporting a
  * fact. Callers who want arithmetic can parse it with full knowledge of the tradeoff.
  */
-function toDecimalString(rawAmount, decimals) {
+export function toDecimalString(rawAmount, decimals) {
   if (rawAmount == null || decimals == null) return null;
   let raw;
   try {

@@ -64,7 +64,7 @@ export async function getBestPair(mint) {
 }
 
 /** Sane quote first, then depth. Array comparison isn't available, so pack into one number. */
-function rank(pair) {
+export function rank(pair) {
   const quoteSymbol = (pair.quoteToken?.symbol || "").toUpperCase();
   const liquidity = pair.liquidity?.usd || 0;
   return (SANE_QUOTE_SYMBOLS.has(quoteSymbol) ? 1e15 : 0) + liquidity;

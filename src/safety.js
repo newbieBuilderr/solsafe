@@ -11,7 +11,19 @@
 import { getMintAuthorities, getHolderConcentration, looksLikeMint } from "./solana.js";
 import { getBestPair, isPumpfunOrigin } from "./pairs.js";
 
-export async function checkMint(mint) {
+/**
+ * @param mint  the SPL mint address
+ * @param deps  seams for testing only. Production always uses the defaults; injecting lets the
+ *              suite drive the failure branches (rate-limited RPC, DexScreener outage) that
+ *              cannot be produced on demand against live infrastructure.
+ */
+export async function checkMint(mint, deps = {}) {
+  const {
+    getMintAuthorities: readAuthorities = getMintAuthorities,
+    getHolderConcentration: readHolders = getHolderConcentration,
+    getBestPair: readPair = getBestPair,
+  } = deps;
+
   if (!looksLikeMint(mint)) {
     const err = new Error("not a valid Solana address (expected 32-44 base58 characters)");
     err.status = 400;
@@ -21,8 +33,8 @@ export async function checkMint(mint) {
   // Both halves are independent, so failure of one shouldn't cost the other. allSettled rather
   // than all: a DexScreener outage must not turn a perfectly good authority check into a 500.
   const [authResult, pairResult] = await Promise.allSettled([
-    getMintAuthorities(mint),
-    getBestPair(mint),
+    readAuthorities(mint),
+    readPair(mint),
   ]);
 
   if (authResult.status === "rejected") {
@@ -47,7 +59,7 @@ export async function checkMint(mint) {
   // address really is a mint.
   let holders = { available: false };
   try {
-    holders = await getHolderConcentration(mint);
+    holders = await readHolders(mint);
   } catch (e) {
     // The reason is carried, never swallowed. "We were rate-limited" and "this token has no
     // holders" are completely different facts about the world, and a caller paying for this
