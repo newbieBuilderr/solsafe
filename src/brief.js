@@ -15,7 +15,13 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import { checkMint } from "./safety.js";
 
-const client = new Anthropic();  // reads ANTHROPIC_API_KEY
+// Constructed on first use rather than at import. Importing this module must not require a key --
+// server.js imports it unconditionally and answers /brief with a clean 503 when none is set.
+let defaultClient;
+function anthropicClient() {
+  defaultClient ??= new Anthropic();  // reads ANTHROPIC_API_KEY
+  return defaultClient;
+}
 
 // claude-opus-5 by default. MEASURED 2026-08-02 on a real BONK call: ~1,900 in (739 fresh +
 // 1,153 cached) / 1,719 out = about $0.05/call against a $0.15 price -- roughly 35% cost of
@@ -25,6 +31,19 @@ const client = new Anthropic();  // reads ANTHROPIC_API_KEY
 // and claude-haiku-4-5 ~$0.004. That's a real choice with a real quality tradeoff, so it's
 // yours to make deliberately rather than something defaulted quietly to the cheapest option.
 const MODEL = process.env.BRIEF_MODEL || "claude-opus-5";
+
+/**
+ * Whether a model accepts `output_config.effort`.
+ *
+ * Not cosmetic: sending it to a model that doesn't support it is a hard 400, so the "just switch
+ * BRIEF_MODEL to something cheaper" advice in .env.example used to break every call. Haiku 4.5
+ * and Sonnet 4.5 reject it; the Opus 4.5+ line, Sonnet 5 and Sonnet 4.6 accept it. Expressed as a
+ * deny-list because the accepting set keeps growing and a stale allow-list would silently
+ * downgrade a capable model instead of failing loudly.
+ */
+export function supportsEffort(model) {
+  return !/^claude-haiku|^claude-sonnet-4-5|^claude-3/.test(model);
+}
 
 // Byte-identical on every request, which is what makes it cacheable -- cache reads bill at
 // roughly a tenth of input rate. Nothing per-request may be interpolated in here: a single
@@ -82,10 +101,18 @@ const BRIEF_SCHEMA = {
   additionalProperties: false,
 };
 
-export async function generateBrief(mint) {
+/**
+ * @param mint  the SPL mint address
+ * @param deps  seams for testing only. Production always uses the defaults; injecting lets the
+ *              suite assert the request shape and drive the refusal and empty-response branches
+ *              without spending model tokens on every run.
+ */
+export async function generateBrief(mint, deps = {}) {
+  const { client = anthropicClient(), checkMint: readFacts = checkMint } = deps;
+
   // Reuses the raw endpoint wholesale -- the agent is a layer on top of solsafe, not a fork of
   // it. A fix to the pair-ranking logic improves both endpoints at once.
-  const facts = await checkMint(mint);
+  const facts = await readFacts(mint);
 
   const response = await client.messages.create({
     model: MODEL,
@@ -97,7 +124,8 @@ export async function generateBrief(mint) {
       // Low effort, thinking left on. Explaining a supplied JSON object is not a reasoning-heavy
       // task, and this is a latency-sensitive paid endpoint. Deliberately NOT disabling thinking:
       // on Opus 5 that has its own failure modes, and low effort already gets the saving.
-      effort: "low",
+      // Omitted entirely on models that reject the parameter -- see supportsEffort.
+      ...(supportsEffort(MODEL) ? { effort: "low" } : {}),
       format: { type: "json_schema", schema: BRIEF_SCHEMA },
     },
     messages: [

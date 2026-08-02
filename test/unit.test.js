@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { toDecimalString, looksLikeMint, getMintAuthorities } from "../src/solana.js";
 import { rank, isPumpfunOrigin, getBestPair } from "../src/pairs.js";
 import { checkMint } from "../src/safety.js";
+import { generateBrief, supportsEffort } from "../src/brief.js";
 
 /** BONK. Used throughout as a syntactically valid mint; most tests stub the network anyway. */
 const MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
@@ -407,6 +408,126 @@ test("an exotic quote attaches a price caveat instead of quietly trusting the pr
     getBestPair: async () => ({ ...(await workingPair()), quoteSymbol: "MET", quoteIsSane: false }),
   });
   assert.match(r.market.priceCaveat, /may be badly wrong/);
+});
+
+// --- generateBrief --------------------------------------------------------------------------
+// The paid endpoint. These run offline against a stubbed client: asserting the request shape
+// costs nothing, while letting the real one run would spend real money on every `npm test`.
+
+const briefBody = {
+  summary: "A token.",
+  what_the_facts_establish: ["Mint authority is revoked."],
+  unusual: [],
+  not_covered: ["Whether the LP is locked."],
+  verify_yourself: ["Call getAccountInfo yourself."],
+};
+
+const factsFixture = {
+  mint: MINT,
+  authority: { mintAuthorityActive: false, supply: "87994598609146.64642" },
+  holders: { topHolderPct: 37.78 },
+};
+
+const stubClient = (overrides = {}) => {
+  const calls = [];
+  const client = {
+    messages: {
+      create: async (req) => {
+        calls.push(req);
+        return {
+          model: "claude-opus-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: JSON.stringify(briefBody) }],
+          usage: { input_tokens: 739, output_tokens: 1719, cache_read_input_tokens: 0, cache_creation_input_tokens: 1153 },
+          ...overrides,
+        };
+      },
+    },
+  };
+  return { client, calls };
+};
+
+const briefDeps = (client) => ({ client, checkMint: async () => factsFixture });
+
+test("generateBrief feeds the measured facts to the model and echoes them back", async () => {
+  const { client, calls } = stubClient();
+  const r = await generateBrief(MINT, briefDeps(client));
+
+  // The facts must reach the prompt, or the brief is describing nothing.
+  assert.match(calls[0].messages[0].content, /87994598609146\.64642/);
+  // And be returned alongside it, so a caller can check the prose against its inputs rather than
+  // taking it on trust -- the same reproducibility claim /safety makes.
+  assert.deepEqual(r.facts, factsFixture);
+  assert.deepEqual(r.brief, briefBody);
+  assert.equal(r.usage.outputTokens, 1719);
+  assert.match(r.disclaimer, /not financial advice/);
+});
+
+test("effort is sent to models that accept it and withheld from those that don't", () => {
+  // Found the hard way: .env.example recommended claude-haiku-4-5 as the cheap option, but the
+  // code always sent effort:"low", and Haiku rejects that parameter with a 400. Switching to the
+  // documented cheaper model broke every call.
+  assert.equal(supportsEffort("claude-opus-5"), true);
+  assert.equal(supportsEffort("claude-sonnet-5"), true);
+  assert.equal(supportsEffort("claude-sonnet-4-6"), true);
+  assert.equal(supportsEffort("claude-haiku-4-5"), false);
+  assert.equal(supportsEffort("claude-sonnet-4-5"), false);
+});
+
+test("the default model request carries the effort setting", async () => {
+  const { client, calls } = stubClient();
+  await generateBrief(MINT, briefDeps(client));
+  assert.equal(calls[0].output_config.effort, "low");
+});
+
+test("generateBrief keeps the system prompt cacheable", async () => {
+  // Losing cache_control costs real money on every call and fails silently -- nothing breaks,
+  // the bill just goes up.
+  const { client, calls } = stubClient();
+  await generateBrief(MINT, briefDeps(client));
+  assert.equal(calls[0].system[0].cache_control.type, "ephemeral");
+});
+
+test("generateBrief constrains output to a schema with no score or verdict field", async () => {
+  const { client, calls } = stubClient();
+  await generateBrief(MINT, briefDeps(client));
+
+  const schema = calls[0].output_config.format.schema;
+  assert.equal(calls[0].output_config.format.type, "json_schema");
+  assert.equal(schema.additionalProperties, false, "the model must not invent extra fields");
+
+  for (const forbidden of ["score", "rating", "recommendation", "verdict", "signal"]) {
+    const offenders = Object.keys(schema.properties).filter((k) => k.toLowerCase().includes(forbidden));
+    assert.deepEqual(offenders, [], `brief schema must expose no "${forbidden}" field`);
+  }
+});
+
+test("generateBrief surfaces a model refusal as an error rather than an empty brief", async () => {
+  const { client } = stubClient({ stop_reason: "refusal", content: [] });
+  await assert.rejects(generateBrief(MINT, briefDeps(client)), (e) => {
+    assert.equal(e.status, 502);
+    return true;
+  });
+});
+
+test("generateBrief errors when the model returns no text block", async () => {
+  const { client } = stubClient({ content: [{ type: "thinking", thinking: "" }] });
+  await assert.rejects(generateBrief(MINT, briefDeps(client)), (e) => {
+    assert.equal(e.status, 502);
+    return true;
+  });
+});
+
+test("a failing facts lookup propagates instead of producing a brief about nothing", async () => {
+  const { client } = stubClient();
+  const boom = Object.assign(new Error("RPC rate-limited (HTTP 429)"), { status: 502 });
+  await assert.rejects(
+    generateBrief(MINT, { client, checkMint: async () => { throw boom; } }),
+    (e) => {
+      assert.equal(e.status, 502);
+      return true;
+    },
+  );
 });
 
 test("the response exposes no score, rating, or verdict field", async () => {
