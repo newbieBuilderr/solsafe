@@ -95,11 +95,20 @@ what the data does not cover. The brief is generated per call, which is why it c
 <tr><th>Field</th><th>Meaning</th></tr>
 <tr><td><code>authority.mintAuthorityActive</code></td><td>Can supply still be inflated to infinity?</td></tr>
 <tr><td><code>authority.freezeAuthorityActive</code></td><td>Can your token account be frozen so you can't sell?</td></tr>
-<tr><td><code>holders.topHolderPct</code></td><td>Share of supply in the largest accounts</td></tr>
+<tr><td><code>holders.topHolderPct</code></td><td>Share of supply in the largest accounts. Unavailable for extremely
+widely held tokens (USDC and the like), where the RPC refuses the query — the response says so
+and sets <code>complete: false</code> rather than guessing.</td></tr>
 <tr><td><code>market.liquidityUsd</code></td><td>Real pool depth, from the best-quoted pair</td></tr>
 <tr><td><code>market.quoteIsSane</code></td><td>Whether the USD price is derived from a SOL/stable pair, or something exotic and unreliable</td></tr>
 <tr><td><code>origin.pumpfun</code></td><td>Whether the mint originated on pump.fun</td></tr>
 </table>
+
+<h2>Partial answers</h2>
+<p>Every response carries <code>complete</code>. When a section could not be retrieved it is listed
+in <code>unavailable</code> and carries the specific reason — rate-limited, unsupported, or absent
+are different facts and are reported as such. If <em>both</em> the holder and market lookups fail
+the call returns <code>502</code> and <strong>you are not charged</strong>; a failed or errored
+request never settles a payment.</p>
 
 <h2>What it is not</h2>
 <p>solsafe returns facts, not opinions. There is no safety score, no buy/sell signal, and no price

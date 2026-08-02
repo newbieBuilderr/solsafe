@@ -55,13 +55,45 @@ export async function checkMint(mint) {
     holders = { available: false, reason: e.message };
   }
 
+  // Carry the actual reason. The previous hardcoded "pair lookup failed" threw away the only
+  // information the caller could act on, and contradicted the rule stated a few lines above.
   const pair = pairResult.status === "fulfilled"
     ? pairResult.value
-    : { available: false, reason: "pair lookup failed" };
+    : {
+        available: false,
+        reason: `pair lookup failed: ${pairResult.reason?.message ?? "unknown error"}`,
+      };
+
+  // Refuse to charge for a materially empty answer.
+  //
+  // The payment middleware settles only on a sub-400 response and cancels otherwise, so the
+  // status code chosen here decides whether the caller pays. Authority flags alone are not what
+  // /safety advertises -- holder concentration and market depth are two thirds of the published
+  // response. When both are missing the honest move is to fail, not to hand over a stub and take
+  // the money. This is an upstream outage on our side, hence 502.
+  if (!holders.available && !pair.available) {
+    const err = new Error(
+      "only authority data could be retrieved; holder and market lookups both failed "
+      + `(holders: ${holders.reason || "unavailable"}; market: ${pair.reason || "unavailable"}). `
+      + "Not charging for a partial answer -- retry shortly.",
+    );
+    err.status = 502;
+    throw err;
+  }
+
+  // Stated up front so a caller can branch on one field instead of probing each section for an
+  // `available` flag. A partial answer is still worth paying for -- authority flags are the
+  // highest-signal part -- but the caller is told plainly that it is partial.
+  const unavailable = [
+    ...(holders.available ? [] : ["holders"]),
+    ...(pair.available ? [] : ["market"]),
+  ];
 
   return {
     mint,
     checkedAt: new Date().toISOString(),
+    complete: unavailable.length === 0,
+    ...(unavailable.length ? { unavailable } : {}),
 
     authority: {
       mintAuthorityActive: auth.mintAuthorityActive,

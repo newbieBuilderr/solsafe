@@ -70,10 +70,35 @@ export async function getMintAuthorities(mint) {
     freezeAuthorityActive: Boolean(info.freezeAuthority),
     decimals: info.decimals ?? null,
     supplyRaw: info.supply ?? null,
-    supply: info.supply != null && info.decimals != null
-      ? Number(info.supply) / 10 ** info.decimals
-      : null,
+    // Exact decimal string, not a float. `Number(raw) / 10 ** decimals` silently loses precision
+    // above 2^53 (~9.0e15) -- BONK's raw supply is already 8.8e15, and a 9-decimal token with a
+    // large supply would simply report a wrong number. A wrong number is worse than no number
+    // for a service whose whole claim is that you can re-derive its answers yourself.
+    supply: toDecimalString(info.supply, info.decimals),
   };
+}
+
+/**
+ * Exact base-10 string for a raw integer amount and a decimal count, via BigInt.
+ *
+ * Returns a string rather than a number on purpose: some SPL supplies genuinely exceed what a
+ * double can represent, and quietly rounding one would be indistinguishable from reporting a
+ * fact. Callers who want arithmetic can parse it with full knowledge of the tradeoff.
+ */
+function toDecimalString(rawAmount, decimals) {
+  if (rawAmount == null || decimals == null) return null;
+  let raw;
+  try {
+    raw = BigInt(rawAmount);
+  } catch {
+    return null;
+  }
+  if (decimals === 0) return raw.toString();
+
+  const divisor = 10n ** BigInt(decimals);
+  const whole = raw / divisor;
+  const fraction = (raw % divisor).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
 }
 
 /**
@@ -86,26 +111,66 @@ export async function getMintAuthorities(mint) {
  * holder census.
  */
 export async function getHolderConcentration(mint, topN = 10) {
-  const result = await rpc("getTokenLargestAccounts", [mint]);
+  let result;
+  try {
+    result = await rpc("getTokenLargestAccounts", [mint]);
+  } catch (e) {
+    // Very widely held tokens (USDC, USDT) exceed what getTokenLargestAccounts will scan and the
+    // node rejects the query outright. That is a permanent property of the token, not a transient
+    // failure, and a caller who retries forever deserves to be told the difference. Verified
+    // against USDC, which fails this way every time.
+    if (/too many accounts/i.test(e.message)) {
+      throw new Error(
+        "this token has too many holders for the RPC's largest-accounts query, so concentration "
+        + "cannot be computed for it -- this is permanent for tokens this widely held, not a "
+        + "transient error worth retrying",
+      );
+    }
+    throw e;
+  }
   const accounts = result?.value || [];
-  if (accounts.length === 0) return { available: false };
+  // Each no-data case carries its own reason. "Nobody holds this token" and "the supply is zero"
+  // are different facts about the world, and collapsing them into one blank answer is exactly
+  // the failure this service exists to avoid.
+  if (accounts.length === 0) {
+    return { available: false, reason: "the RPC returned no token accounts for this mint" };
+  }
 
   const supplyResult = await rpc("getTokenSupply", [mint]);
-  const totalSupply = Number(supplyResult?.value?.uiAmount || 0);
-  if (!totalSupply) return { available: false };
+  // Raw integer strings throughout -- see toDecimalString above for why floats are not safe here.
+  // Percentages are derived by integer arithmetic in basis points, so the figure is exact for any
+  // supply an SPL mint can express rather than merely close for small ones.
+  let totalRaw;
+  try {
+    totalRaw = BigInt(supplyResult?.value?.amount ?? "0");
+  } catch {
+    return { available: false, reason: "RPC returned an unreadable supply value" };
+  }
+  if (totalRaw === 0n) {
+    return { available: false, reason: "token supply is zero, so concentration is undefined" };
+  }
 
   const amounts = accounts
-    .map((a) => Number(a.uiAmount || 0))
-    .sort((a, b) => b - a);
+    .map((a) => {
+      try {
+        return BigInt(a.amount ?? "0");
+      } catch {
+        return 0n;
+      }
+    })
+    .sort((a, b) => (b > a ? 1 : b < a ? -1 : 0));
+
   const top = amounts.slice(0, topN);
-  const held = top.reduce((sum, n) => sum + n, 0);
+  const held = top.reduce((sum, n) => sum + n, 0n);
+
+  const pct = (part) => Number((part * 1000000n) / totalRaw) / 10000;
 
   return {
     available: true,
     topN,
     accountsReturned: accounts.length,
-    topHolderPct: round(held / totalSupply * 100, 2),
-    largestHolderPct: round(amounts[0] / totalSupply * 100, 2),
+    topHolderPct: round(pct(held), 2),
+    largestHolderPct: round(pct(amounts[0]), 2),
   };
 }
 
